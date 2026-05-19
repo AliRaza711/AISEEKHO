@@ -13,22 +13,65 @@ datasource db {
 }
 
 model Portfolio {
-  id          String     @id @default(uuid())
-  userId      String
-  cashBalance Float
-  totalValue  Float
-  riskScore   Float
-  tradeLogs   TradeLog[]
+  id             String          @id @default(uuid())
+  userId         String          @unique
+  cashBalance    Float
+  totalValue     Float
+  riskScore      Float
+  positions      Position[]
+  tradeLogs      TradeLog[]
+  analysisTraces AnalysisTrace[]
+  historicalSnapshots HistoricalSnapshot[]
+}
+
+model Position {
+  id           String    @id @default(uuid())
+  portfolioId  String
+  portfolio    Portfolio @relation(fields: [portfolioId], references: [id])
+  symbol       String
+  shares       Int
+  averagePrice Float
+  updatedAt    DateTime  @default(now())
+
+  @@unique([portfolioId, symbol])
 }
 
 model TradeLog {
+  id                  String    @id @default(uuid())
+  portfolioId         String
+  portfolio           Portfolio @relation(fields: [portfolioId], references: [id])
+  action              String
+  symbol              String
+  quantity            Int
+  price               Float
+  reasoning           String
+  previousCashBalance Float?
+  newCashBalance      Float?
+  previousTotalValue  Float?
+  newTotalValue       Float?
+  createdAt           DateTime  @default(now())
+}
+
+model HistoricalSnapshot {
   id          String   @id @default(uuid())
   portfolioId String
   portfolio   Portfolio @relation(fields: [portfolioId], references: [id])
-  action      String
-  symbol      String
-  quantity    Int
-  price       Float
-  reasoning   String
-  createdAt   DateTime @default(now())
+  cashBalance Float
+  assetValue  Float
+  totalValue  Float
+  snapshotDate DateTime @db.Date
+
+  @@unique([portfolioId, snapshotDate])
+}
+
+model AnalysisTrace {
+  id                String     @id @default(uuid())
+  portfolioId       String?
+  portfolio         Portfolio? @relation(fields: [portfolioId], references: [id])
+  unstructuredInput String
+  extractedInsights String
+  impactAnalysis    String
+  executionPlan     Json
+  tradeResult       Json?
+  createdAt         DateTime   @default(now())
 }

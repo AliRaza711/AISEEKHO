@@ -3,12 +3,20 @@ const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
 const snapshotService = require('./services/snapshotService');
+const { PrismaClient } = require('@prisma/client');
+const { PrismaPg } = require('@prisma/adapter-pg');
 
 // Initialize PostgreSQL Pool using your Neon connection string
-global.db = new Pool({
+const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false } // Required for cloud providers like Neon
 });
+
+global.db = pool;
+
+// Initialize Prisma Client with pg adapter
+const adapter = new PrismaPg(pool);
+global.prisma = new PrismaClient({ adapter });
 
 // Add this right after global.db = new Pool({...}) inside src/server.js
 // const initDb = async () => {

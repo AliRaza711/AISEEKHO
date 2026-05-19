@@ -15,22 +15,27 @@ class TradeController {
       const currentPrice = await marketDataService.getCurrentPrice(ticker);
       const transactionValue = qty * currentPrice;
 
-      // 2. Fetch or initialize the user's Portfolio
-      let portfolioResult = await global.db.query(
-        'SELECT * FROM "Portfolio" WHERE "userId" = $1 LIMIT 1',
-        [userId]
-      );
-      let portfolio = portfolioResult.rows[0];
+      // 2. Fetch or initialize the user's Portfolio via Prisma
+      let portfolio = await global.prisma.portfolio.findUnique({
+        where: { userId },
+        include: { positions: true }
+      });
 
       if (!portfolio) {
-        const createResult = await global.db.query(
-          'INSERT INTO "Portfolio" (id, "userId", "cashBalance", "totalValue", "riskScore") VALUES (md5(random()::text), $1, 1000000, 1000000, 0.5) RETURNING *',
-          [userId]
-        );
-        portfolio = createResult.rows[0];
+        portfolio = await global.prisma.portfolio.create({
+          data: {
+            userId,
+            cashBalance: 1000000,
+            totalValue: 1000000,
+            riskScore: 0.5
+          },
+          include: { positions: true }
+        });
       }
 
-      let newCashBalance = parseFloat(portfolio.cashBalance);
+      const previousCashBalance = portfolio.cashBalance;
+      const previousTotalValue = portfolio.totalValue;
+      let newCashBalance = previousCashBalance;
 
       // 3. Process Transaction Execution Logic
       if (action.toUpperCase() === 'BUY') {
@@ -39,74 +44,89 @@ class TradeController {
         }
         newCashBalance -= transactionValue;
 
-        // Upsert Position using text-based random IDs
-        await global.db.query(`
-          INSERT INTO "position" (id, "portfolioId", symbol, shares, "averagePrice", "updatedAt")
-          VALUES (md5(random()::text), $1, $2, $3, $4, NOW())
-          ON CONFLICT ("portfolioId", symbol) DO UPDATE SET
-            "averagePrice" = (("position".shares * "position"."averagePrice") + $5) / ("position".shares + $3),
-            shares = "position".shares + $3,
-            "updatedAt" = NOW()
-        `, [portfolio.id, ticker, qty, currentPrice, transactionValue]);
+        // Upsert Position
+        const existingPosition = portfolio.positions.find(p => p.symbol === ticker);
+        if (existingPosition) {
+           const newShares = existingPosition.shares + qty;
+           const newAvgPrice = ((existingPosition.shares * existingPosition.averagePrice) + transactionValue) / newShares;
+           
+           await global.prisma.position.update({
+             where: { id: existingPosition.id },
+             data: { shares: newShares, averagePrice: newAvgPrice, updatedAt: new Date() }
+           });
+        } else {
+           await global.prisma.position.create({
+             data: {
+               portfolioId: portfolio.id,
+               symbol: ticker,
+               shares: qty,
+               averagePrice: currentPrice
+             }
+           });
+        }
 
       } else if (action.toUpperCase() === 'SELL') {
-        const positionResult = await global.db.query(
-          'SELECT * FROM "position" WHERE "portfolioId" = $1 AND symbol = $2',
-          [portfolio.id, ticker]
-        );
-        const currentPosition = positionResult.rows[0];
+        const existingPosition = portfolio.positions.find(p => p.symbol === ticker);
 
-        if (!currentPosition || currentPosition.shares < qty) {
+        if (!existingPosition || existingPosition.shares < qty) {
           return res.status(400).json({ error: `Insufficient inventory. Cannot SELL ${qty} shares of ${ticker}.` });
         }
 
         newCashBalance += transactionValue;
 
-        if (currentPosition.shares === qty) {
-          await global.db.query('DELETE FROM "position" WHERE id = $1', [currentPosition.id]);
+        if (existingPosition.shares === qty) {
+          await global.prisma.position.delete({ where: { id: existingPosition.id } });
         } else {
-          await global.db.query(
-            'UPDATE "position" SET shares = shares - $1, "updatedAt" = NOW() WHERE id = $2',
-            [qty, currentPosition.id]
-          );
+          await global.prisma.position.update({
+            where: { id: existingPosition.id },
+            data: { shares: existingPosition.shares - qty, updatedAt: new Date() }
+          });
         }
       } else {
         return res.status(400).json({ error: 'Invalid operation directive. Action must be BUY or SELL.' });
       }
 
-      // 4. Update Portfolio Cash Balances
-      await global.db.query(
-        'UPDATE "Portfolio" SET "cashBalance" = $1 WHERE id = $2',
-        [newCashBalance, portfolio.id]
-      );
-
-      // 5. Log Transaction to TradeLog History using text ID logic
-      const logResult = await global.db.query(
-        'INSERT INTO "TradeLog" (id, "portfolioId", action, symbol, quantity, price, reasoning, "createdAt") VALUES (md5(random()::text), $1, $2, $3, $4, $5, $6, NOW()) RETURNING *',
-        [portfolio.id, action.toUpperCase(), ticker, qty, currentPrice, reasoning || '']
-      );
-
-      // 6. Compute Real-time Mark-to-Market Valuation
-      const positionsSummary = await global.db.query('SELECT * FROM "position" WHERE "portfolioId" = $1', [portfolio.id]);
+      // 4. Compute Real-time Mark-to-Market Valuation
+      const updatedPositions = await global.prisma.position.findMany({ where: { portfolioId: portfolio.id } });
       let totalAssetValue = 0;
       
-      for (const pos of positionsSummary.rows) {
+      for (const pos of updatedPositions) {
         const livePrice = await marketDataService.getCurrentPrice(pos.symbol);
         totalAssetValue += pos.shares * livePrice;
       }
       
-      const newTotalPortfolioValue = newCashBalance + totalAssetValue;
-      
-      const finalPortfolioUpdate = await global.db.query(
-        'UPDATE "Portfolio" SET "totalValue" = $1 WHERE id = $2 RETURNING *',
-        [newTotalPortfolioValue, portfolio.id]
-      );
+      const newTotalValue = newCashBalance + totalAssetValue;
+
+      // 5. Update Portfolio Cash Balances & Total Value
+      const finalPortfolioUpdate = await global.prisma.portfolio.update({
+        where: { id: portfolio.id },
+        data: {
+          cashBalance: newCashBalance,
+          totalValue: newTotalValue
+        }
+      });
+
+      // 6. Log Transaction to TradeLog History with Before/After State
+      const executedLog = await global.prisma.tradeLog.create({
+        data: {
+          portfolioId: portfolio.id,
+          action: action.toUpperCase(),
+          symbol: ticker,
+          quantity: qty,
+          price: currentPrice,
+          reasoning: reasoning || '',
+          previousCashBalance,
+          newCashBalance,
+          previousTotalValue,
+          newTotalValue
+        }
+      });
 
       return res.status(200).json({
         message: 'Transaction successfully processed and asset ledger adjusted.',
-        portfolio: finalPortfolioUpdate.rows[0],
-        positions: positionsSummary.rows,
-        executedLog: logResult.rows[0]
+        portfolio: finalPortfolioUpdate,
+        positions: updatedPositions,
+        executedLog
       });
 
     } catch (error) {

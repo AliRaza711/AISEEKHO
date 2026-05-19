@@ -1,25 +1,28 @@
+const axios = require('axios');
+
 class MarketDataService {
-  // Simulates fetching real-time market data from the PSX board
   async getCurrentPrice(symbol) {
     const ticker = symbol.toUpperCase();
+    const apiKey = 'f5f28f279ac24107861e47dcb027e131';
     
-    // Baseline realistic trading prices for key PSX equities in PKR
-    const basePrices = {
-      SYS: 465.50,
-      HUBC: 122.30,
-      LUCK: 680.15,
-      ENGRO: 310.40,
-      OGDC: 145.20
-    };
+    // Note the "&exchange=XKAR" - This forces it to pull from the Karachi Stock Exchange
+    const url = `https://api.twelvedata.com/price?symbol=${ticker}&exchange=XKAR&apikey=${apiKey}`;
 
-    const basePrice = basePrices[ticker] || 150.00;
-    
-    // Add a minor random micro-fluctuation (-1% to +1%) to simulate a live ticker ticker
-    const fluctuation = 1 + (Math.random() * 0.02 - 0.01);
-    const livePrice = parseFloat((basePrice * fluctuation).toFixed(2));
+    try {
+      const response = await axios.get(url);
+      
+      if (response.data && response.data.price) {
+        const livePrice = parseFloat(response.data.price);
+        console.log(`[MarketDataService] 🟢 TWELVE DATA API (XKAR) fetched for ${ticker}: ${livePrice} PKR`);
+        return livePrice;
+      }
+      
+      throw new Error("API did not return a valid price.");
 
-    console.log(`[MarketDataService] Fetched live PSX quote for ${ticker}: ${livePrice} PKR`);
-    return livePrice;
+    } catch (error) {
+      console.warn(`[MarketDataService] 🔴 API failed for ${ticker}. Using fallback.`);
+      return 150.00; 
+    }
   }
 }
 

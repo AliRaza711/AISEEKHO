@@ -21,41 +21,61 @@ class SnapshotService {
     try {
       console.log('\n--- STARTING DAILY SNAPSHOT ACCOUNTING CYCLE ---');
       
-      // 1. Fetch all active user portfolios
-      const portfoliosResult = await global.db.query('SELECT * FROM "Portfolio"');
+      // 1. Fetch all active user portfolios with positions
+      const portfolios = await global.prisma.portfolio.findMany({
+        include: { positions: true }
+      });
       
-      for (const portfolio of portfoliosResult.rows) {
-        // 2. Fetch all current open asset positions for this user
-        const positionsResult = await global.db.query(
-          'SELECT * FROM "position" WHERE "portfolioId" = $1',
-          [portfolio.id]
-        );
+      const today = new Date();
+      today.setUTCHours(0,0,0,0);
 
-        // 3. Compute real-time current valuation of all positions
+      for (const portfolio of portfolios) {
+        // 2. Compute real-time current valuation of all positions
         let totalAssetValue = 0;
-        for (const pos of positionsResult.rows) {
+        for (const pos of portfolio.positions) {
           const livePrice = await marketDataService.getCurrentPrice(pos.symbol);
           totalAssetValue += pos.shares * livePrice;
         }
 
-        const cash = parseFloat(portfolio.cashBalance);
+        const cash = portfolio.cashBalance;
         const exactTotalValue = cash + totalAssetValue;
 
-        // 4. Save or Upsert snapshot entry for today
-        await global.db.query(`
-          INSERT INTO "HistoricalSnapshot" ("id", "portfolioId", "cashBalance", "assetValue", "totalValue", "snapshotDate")
-          VALUES (md5(random()::text), $1, $2, $3, $4, CURRENT_DATE)
-          ON CONFLICT ("portfolioId", "snapshotDate") DO UPDATE SET
-            "cashBalance" = EXCLUDED."cashBalance",
-            "assetValue" = EXCLUDED."assetValue",
-            "totalValue" = EXCLUDED."totalValue"
-        `, [portfolio.id, cash, totalAssetValue, exactTotalValue]);
+        // 3. Save or Upsert snapshot entry for today
+        const existingSnapshot = await global.prisma.historicalSnapshot.findUnique({
+          where: {
+            portfolioId_snapshotDate: {
+              portfolioId: portfolio.id,
+              snapshotDate: today
+            }
+          }
+        });
 
-        // 5. Keep the primary Portfolio metadata in sync
-        await global.db.query(
-          'UPDATE "Portfolio" SET "totalValue" = $1 WHERE id = $2',
-          [exactTotalValue, portfolio.id]
-        );
+        if (existingSnapshot) {
+          await global.prisma.historicalSnapshot.update({
+            where: { id: existingSnapshot.id },
+            data: {
+              cashBalance: cash,
+              assetValue: totalAssetValue,
+              totalValue: exactTotalValue
+            }
+          });
+        } else {
+          await global.prisma.historicalSnapshot.create({
+            data: {
+              portfolioId: portfolio.id,
+              cashBalance: cash,
+              assetValue: totalAssetValue,
+              totalValue: exactTotalValue,
+              snapshotDate: today
+            }
+          });
+        }
+
+        // 4. Keep the primary Portfolio metadata in sync
+        await global.prisma.portfolio.update({
+          where: { id: portfolio.id },
+          data: { totalValue: exactTotalValue }
+        });
 
         console.log(`[Snapshot] Saved portfolio metrics for user ID: ${portfolio.userId} (Total Net Worth: ${exactTotalValue.toFixed(2)} PKR)`);
       }
